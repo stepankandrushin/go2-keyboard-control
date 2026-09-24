@@ -182,9 +182,6 @@ class KeyboardController:
                 'command': 'StopMove',
                 'message': '🚨 EMERGENCY STOP!'
             },
-            'h': {
-                'message': '❓ Redraw help...'
-            },
             'esc': {
                 'message': '👋 Disconnecting and exiting...'
             }
@@ -333,7 +330,7 @@ class KeyboardController:
         self.print_help()
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGWINCH, self.print_help)
-        self.print_action("🤖 Robot Control Started! Press 'H' to redraw help, 'ESC' to exit.")
+        self.print_action("🤖 Robot Control Started! Press 'ESC' to exit.")
         
         try:
             while self.running:
@@ -342,12 +339,7 @@ class KeyboardController:
                 if key is None:
                     await asyncio.sleep(0.1)
                     continue
-                
-                # Special handling for help
-                if key == 'h':
-                    self.print_help()
-                    continue
-                
+
                 # Handle all other actions
                 await self.handle_key_action(key)
                 

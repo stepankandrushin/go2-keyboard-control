@@ -35,6 +35,6 @@ uvx --from unitree_webrtc_connect unitree-fetch-aes-key --email you@example.com 
 
 ## Keys
 
-The help menu is pinned to the top of the terminal (`H` redraws it, `Esc`
-exits). WASD move, Q/E and Z/C rotate, Space is an emergency stop; tricks,
-dances and gaits are on the remaining keys.
+The help menu is pinned to the top of the terminal and redraws automatically
+on window resize; `Esc` exits. WASD move, Q/E and Z/C rotate, Space is an
+emergency stop; tricks, dances and gaits are on the remaining keys.
