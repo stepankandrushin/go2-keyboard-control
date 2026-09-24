@@ -195,7 +195,7 @@ class KeyboardController:
         """Get keyboard input for Mac OS X"""
         if select.select([sys.stdin], [], [], 0.1)[0]:
             key = sys.stdin.read(1).lower()
-            if key == '\x1b':  # ESC key
+            if key in ('\x1b', '\x03'):  # ESC, or Ctrl+C (no SIGINT in raw mode)
                 return 'esc'
             elif key == ' ':  # Space
                 return 'space'
@@ -410,6 +410,7 @@ async def main():
         print("❌ Keyboard control needs an interactive terminal")
         return
     controller = KeyboardController()
+    conn = None
 
     try:
         conn = create_connection(args)
@@ -463,6 +464,14 @@ async def main():
         print(f"❌ Unexpected error: {e}")
         import traceback
         traceback.print_exc()
+    finally:
+        # Close the peer connection explicitly: aiortc's receiver threads only
+        # stop on pc.close(), and left running they block interpreter exit
+        if conn is not None:
+            try:
+                await asyncio.wait_for(conn.disconnect(), timeout=5)
+            except Exception as e:
+                print(f"⚠️ Disconnect did not finish cleanly: {e}")
 
 if __name__ == "__main__":
     try:
