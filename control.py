@@ -164,7 +164,7 @@ class KeyboardController:
                 'command': 'MoonWalk',
                 'message': '🌙 Moon Walk...'
             },
-            '6': {
+            '4': {
                 'command': 'CrossStep',
                 'message': '❌ Cross Step...'
             },
