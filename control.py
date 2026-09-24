@@ -116,10 +116,6 @@ class KeyboardController:
                 'command': 'BackFlip',
                 'message': '🤸 Back Flip...'
             },
-            '6': {
-                'command': 'LeftFlip',
-                'message': '🤸 Left Flip...'
-            },
             'j': {
                 'command': 'RightFlip',
                 'message': '🤸 Right Flip...'
@@ -150,23 +146,27 @@ class KeyboardController:
                 'command': 'Stretch',
                 'message': '🧘 Stretch...'
             },
-            '2': {
-                'command': 'WiggleHips',
-                'message': '🕺 Wiggle Hips...'
-            },
+
+            # Numbered commands (1-8)
             '1': {
                 'command': 'FingerHeart',
                 'message': '💖 Finger Heart...'
             },
-            
-            # Special gaits
-            '5': {
-                'command': 'MoonWalk',
-                'message': '🌙 Moon Walk...'
+            '2': {
+                'command': 'WiggleHips',
+                'message': '🕺 Wiggle Hips...'
             },
             '4': {
                 'command': 'CrossStep',
                 'message': '❌ Cross Step...'
+            },
+            '5': {
+                'command': 'MoonWalk',
+                'message': '🌙 Moon Walk...'
+            },
+            '6': {
+                'command': 'LeftFlip',
+                'message': '🤸 Left Flip...'
             },
             '7': {
                 'command': 'Handstand',
