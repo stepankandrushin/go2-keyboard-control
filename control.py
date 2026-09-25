@@ -82,6 +82,10 @@ class KeyboardController:
                 'command': 'StandUp',
                 'message': '🏃 Standing Up...'
             },
+            'l': {
+                'command': 'StandDown',
+                'message': '🛏️ Lying Down... (then P to stand)'
+            },
             'x': {
                 'command': 'Sit',
                 'message': '🪑 Sitting Down... (then R to move)'
@@ -124,7 +128,7 @@ class KeyboardController:
                 'command': 'FrontJump',
                 'message': '🦘 Front Jump...'
             },
-            'l': {
+            'h': {
                 'command': 'FrontPounce',
                 'message': '🦁 Front Pounce...'
             },
