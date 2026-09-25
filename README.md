@@ -2,8 +2,7 @@
 
 Single-file keyboard teleop for the Unitree Go2 over WebRTC, built on
 [legion1581/unitree_webrtc_connect](https://github.com/legion1581/unitree_webrtc_connect)
-(PyPI: `unitree_webrtc_connect`). Ported from the `control.py` example in the
-phospho `go2_webrtc_connect` fork.
+(PyPI: `unitree_webrtc_connect`).
 
 ## Run
 
