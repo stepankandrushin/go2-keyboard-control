@@ -1,6 +1,6 @@
 # go2-keyboard-control
 
-Single-file keyboard teleop for the Unitree Go2 over WebRTC, built on
+Single-file keyboard teleop for the Unitree Go2 (Air/Pro/EDU) over WebRTC, built on
 [legion1581/unitree_webrtc_connect](https://github.com/legion1581/unitree_webrtc_connect)
 (PyPI: `unitree_webrtc_connect`).
 
