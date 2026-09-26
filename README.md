@@ -4,6 +4,8 @@ Single-file keyboard teleop for the Unitree Go2 (Air/Pro/EDU) over WebRTC, built
 [legion1581/unitree_webrtc_connect](https://github.com/legion1581/unitree_webrtc_connect)
 (PyPI: `unitree_webrtc_connect`).
 
+[![Unitree Go2 Keyboard Remote Control over WebRTC (Python, Open Source)](https://img.youtube.com/vi/Mid-MZnUZ7Y/maxresdefault.jpg)](https://youtu.be/Mid-MZnUZ7Y)
+
 ## Run
 
 With [uv](https://docs.astral.sh/uv/) the dependencies come from the inline
