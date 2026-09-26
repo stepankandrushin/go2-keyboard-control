@@ -39,3 +39,20 @@ uvx --from unitree_webrtc_connect unitree-fetch-aes-key --email you@example.com 
 The help menu is pinned to the top of the terminal and redraws automatically
 on window resize; `Esc` exits. WASD move, Q/E and Z/C rotate, Space is an
 emergency stop; tricks, dances and gaits are on the remaining keys.
+
+## Status panel
+
+Below the key menu, three lines refresh twice a second from the robot's
+state topics (`rt/lf/lowstate`, `rt/lf/sportmodestate`, `rt/multiplestate`,
+`rt/utlidar/lidar_state`):
+
+```
+🔋 74%  30.4 V  -1.7 A  -51 W  cells 23°C  BMS 26°C  body 39°C  2 cycles
+✅ no errors  🌡️ motors max 32°C (FR calf)  📡 LiDAR 15 Hz, dirty 0%
+🐕 Balance stand, trot  0.02 m/s  height 0.32 m  roll +1° pitch -1°  speed level 0  avoidance on  volume 5/10
+```
+
+Battery current is negative while discharging. Robot errors (fan jammed,
+motor overheating, ...) are listed in the panel and logged when they appear
+or clear. A line reads "no ... data" when its topic has been silent for 3 s.
+Narrow terminals drop the trailing fields.

@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import logging
 import json
+import math
 import os
 import sys
 import termios
@@ -20,21 +21,49 @@ import select
 import unicodedata
 import shutil
 import signal
+import time
 from unitree_webrtc_connect import (
     UnitreeWebRTCConnection,
     WebRTCConnectionMethod,
     RTC_TOPIC,
     SPORT_CMD,
     discover_ip_sn,
+    webrtc_datachannel,
+)
+from unitree_webrtc_connect.msgs.error_handler import (
+    get_error_code_text,
+    get_error_source_text,
+    integer_to_hex_string,
 )
 
 # Enable logging for debugging
 logging.basicConfig(level=logging.FATAL)
 
+# State topics feeding the status panel (lowstate and multiplestate come at
+# 1 Hz, sportmodestate at 20 Hz)
+TELEMETRY_TOPICS = ("LOW_STATE", "LF_SPORT_MOD_STATE", "MULTIPLE_STATE", "ULIDAR_STATE")
+STATUS_LINES = 3
+STALE_AFTER = 3  # seconds without a sample before a topic counts as missing
+
+# lowstate motor_state order; entries past the 12th are unused on the Go2
+MOTOR_NAMES = [f"{leg} {joint}" for leg in ("FR", "FL", "RR", "RL")
+               for joint in ("hip", "thigh", "calf")]
+
+# sportmodestate mode and gait_type values
+SPORT_MODES = {
+    0: "Idle", 1: "Balance stand", 2: "Pose", 3: "Locomotion", 5: "Lying down",
+    6: "Joint lock", 7: "Damping", 8: "Recovery stand", 10: "Sitting",
+    11: "Front flip", 12: "Front jump", 13: "Front pounce",
+}
+GAITS = {0: "idle", 1: "trot", 2: "run", 3: "stairs up", 4: "stairs down", 9: "adjust"}
+
 class KeyboardController:
     def __init__(self):
         self.running = True
         self.conn = None
+        self.telemetry = {}      # topic -> (monotonic time, latest data)
+        self.errors = {}         # active robot errors: (source, code) -> text
+        self.status_row = None   # terminal row of the status panel, if pinned
         
         # Movement settings
         self.movement_speed = 0.5     # Default movement speed
@@ -271,6 +300,8 @@ class KeyboardController:
                    for c in range(num_cols) if c * num_rows + r < len(entries)]
             lines.append("".join(row).rstrip())
         lines.append("=" * width)
+        lines += self.status_lines(width)
+        lines.append("=" * width)
         return lines
 
     def print_help(self):
@@ -279,12 +310,154 @@ class KeyboardController:
         lines = self.help_lines(width)
         # Reset scroll region, clear screen, draw the menu at the top
         out = "\x1b[r\x1b[2J\x1b[H" + "\r\n".join(lines) + "\r\n"
+        self.status_row = None
         if len(lines) < height - 1:
             # Restrict scrolling to the area below the menu
             top = len(lines) + 1
             out += f"\x1b[{top};{height}r\x1b[{top};1H"
+            self.status_row = len(lines) - STATUS_LINES
         sys.stdout.write(out)
         sys.stdout.flush()
+
+    def start_telemetry(self):
+        """Subscribe to the state topics feeding the status panel"""
+        def store(topic):
+            def callback(message):
+                self.telemetry[topic] = (time.monotonic(), message["data"])
+            return callback
+        for topic in TELEMETRY_TOPICS:
+            self.conn.datachannel.pub_sub.subscribe(RTC_TOPIC[topic], store(topic))
+
+    def latest(self, topic):
+        """Newest sample of a telemetry topic, or None if missing or stale"""
+        stamp, data = self.telemetry.get(topic, (0, None))
+        return data if time.monotonic() - stamp < STALE_AFTER else None
+
+    def on_robot_errors(self, message):
+        """Track the robot's active errors (replaces the driver's printer)"""
+        data = message.get("data") or []
+        if data and not isinstance(data[0], (list, tuple)):
+            data = [data]
+        entries = {}
+        for _timestamp, source, code in data:
+            code_text = get_error_code_text(source, integer_to_hex_string(code))
+            entries[(source, code)] = f"{get_error_source_text(source)}: {code_text}"
+        if message.get("type") == "rm_error":
+            for key, text in entries.items():
+                if self.errors.pop(key, None):
+                    self.print_action(f"✅ Robot error cleared: {text}")
+            return
+        for key, text in entries.items():
+            if key not in self.errors:
+                self.print_action(f"🚨 Robot error: {text}")
+        # "errors" is a full snapshot, "add_error" a single new one
+        self.errors = entries if message.get("type") == "errors" else {**self.errors, **entries}
+
+    @staticmethod
+    def peak(value):
+        """Highest reading of a sensor that may report one value or several"""
+        return max(value) if isinstance(value, list) else value
+
+    def power_status(self):
+        """Battery and board temperatures from lowstate"""
+        low = self.latest("LOW_STATE")
+        if low is None:
+            return ["🔋 no battery data"]
+        bms = low["bms_state"]
+        amps = bms["current"] / 1000  # negative while discharging
+        return [
+            f"🔋 {bms['soc']}%",
+            f"{low['power_v']:.1f} V",
+            f"{amps:+.1f} A",
+            f"{low['power_v'] * amps:+.0f} W",
+            f"cells {self.peak(bms['bq_ntc'])}°C",
+            f"BMS {self.peak(bms['mcu_ntc'])}°C",
+            f"body {low['temperature_ntc1']}°C",
+            f"{bms['cycle']} cycles",
+        ]
+
+    def health_status(self):
+        """Active errors, hottest motor and LiDAR health"""
+        if self.errors:
+            pieces = [f"🚨 {len(self.errors)} error(s): " + "; ".join(self.errors.values())]
+        else:
+            pieces = ["✅ no errors"]
+        low = self.latest("LOW_STATE")
+        if low:
+            temps = [motor["temperature"] for motor in low["motor_state"][:len(MOTOR_NAMES)]]
+            hottest = max(range(len(temps)), key=temps.__getitem__)
+            pieces.append(f"🌡️ motors max {temps[hottest]}°C ({MOTOR_NAMES[hottest]})")
+        lidar = self.latest("ULIDAR_STATE")
+        if lidar:
+            lidar_text = f"📡 LiDAR {lidar['cloud_frequency']:.0f} Hz, dirty {lidar['dirty_percentage']}%"
+            if lidar["error_state"]:
+                lidar_text += f", error {lidar['error_state']}"
+            pieces.append(lidar_text)
+        return pieces
+
+    def motion_status(self):
+        """Sport mode state and the app-level settings"""
+        pieces = []
+        sport = self.latest("LF_SPORT_MOD_STATE")
+        if sport:
+            mode = SPORT_MODES.get(sport["mode"], f"mode {sport['mode']}")
+            gait = GAITS.get(sport["gait_type"], f"gait {sport['gait_type']}")
+            vx, vy = sport["velocity"][:2]
+            roll, pitch = (math.degrees(angle) for angle in sport["imu_state"]["rpy"][:2])
+            pieces += [
+                f"🐕 {mode}, {gait}",
+                f"{math.hypot(vx, vy):.2f} m/s",
+                f"height {sport['body_height']:.2f} m",
+                f"roll {roll:+.0f}° pitch {pitch:+.0f}°",
+            ]
+            if sport["error_code"]:
+                pieces.insert(1, f"⚠️ sport error {sport['error_code']}")
+        multi = self.latest("MULTIPLE_STATE")
+        if multi:
+            settings = json.loads(multi)
+            pieces += [
+                f"speed level {settings['speedLevel']}",
+                f"avoidance {'on' if settings['obstaclesAvoidSwitch'] else 'off'}",
+                f"volume {settings['volume']}/10",
+            ]
+        return pieces or ["🐕 no motion data"]
+
+    def fit(self, pieces, width):
+        """Join status pieces into one line, dropping those that don't fit"""
+        line = ""
+        for piece in pieces:
+            candidate = f"{line}  {piece}"
+            if self.display_width(candidate) > width:
+                break
+            line = candidate
+        if not line:
+            # Even the first piece is too wide: cut it at the edge
+            line = f"  {pieces[0]}"
+            while self.display_width(line) > width:
+                line = line[:-1]
+        return line
+
+    def status_lines(self, width):
+        """The status panel, one line per group"""
+        return [self.fit(pieces, width) for pieces in
+                (self.power_status(), self.health_status(), self.motion_status())]
+
+    def draw_status(self):
+        """Refresh the status panel in place, keeping the cursor where it was"""
+        if self.status_row is None:
+            return
+        width = shutil.get_terminal_size().columns
+        out = "\x1b7"
+        for i, line in enumerate(self.status_lines(width)):
+            out += f"\x1b[{self.status_row + i};1H\x1b[2K{line}"
+        sys.stdout.write(out + "\x1b8")
+        sys.stdout.flush()
+
+    async def status_updater(self):
+        """Redraw the status panel twice a second"""
+        while self.running:
+            self.draw_status()
+            await asyncio.sleep(0.5)
 
     def reset_screen(self):
         """Release the scroll region and put the cursor at the bottom"""
@@ -340,6 +513,7 @@ class KeyboardController:
         self.print_help()
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGWINCH, self.print_help)
+        status_task = asyncio.create_task(self.status_updater())
         self.print_action("🤖 Robot Control Started! Press 'ESC' to exit.")
         
         try:
@@ -361,6 +535,7 @@ class KeyboardController:
                 
         finally:
             # Restore terminal settings
+            status_task.cancel()
             loop.remove_signal_handler(signal.SIGWINCH)
             self.reset_screen()
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
@@ -421,6 +596,8 @@ async def main():
         return
     controller = KeyboardController()
     conn = None
+    # Show robot errors in the status panel instead of the driver's printout
+    webrtc_datachannel.handle_error = controller.on_robot_errors
 
     try:
         conn = create_connection(args)
@@ -433,6 +610,7 @@ async def main():
         print("🔗 Connecting to robot...")
         await conn.connect()
         print("✅ Connected successfully!")
+        controller.start_telemetry()
         
         ####### NORMAL MODE ########
         print("🔍 Checking current motion mode...")
