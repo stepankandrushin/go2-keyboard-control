@@ -207,18 +207,23 @@ class KeyboardController:
                 return key
         return None
     
-    def print_action(self, message):
+    def print_action(self, message, end='\n'):
         """Print action message with proper formatting for raw terminal mode"""
-        print(f"\r{message}\n", end='', flush=True)
+        print(f"\r{message}{end}", end='', flush=True)
 
-    def check_response(self, command_name, response):
-        """Print the robot's reply if it rejected the command"""
+    def print_result(self, message):
+        """Finish the pending action line with the command's outcome"""
+        print(f" {message}\n", end='', flush=True)
+
+    def print_response(self, command_name, response):
+        """Print the robot's reply to a command"""
         try:
             status = response["data"]["header"]["status"]
         except (KeyError, TypeError):
+            self.print_result(f"❔ {command_name} reply: {response}")
             return
-        if status.get("code") != 0:
-            self.print_action(f"⚠️ Robot rejected {command_name}: {status} {response['data'].get('data', '')}")
+        mark = "✅" if status.get("code") == 0 else "⚠️"
+        self.print_result(f"{mark} {command_name} reply: {status} {response['data'].get('data', '')}".rstrip())
     
     async def move_robot(self, x=0, y=0, z=0):
         """Send movement command to robot"""
@@ -228,9 +233,9 @@ class KeyboardController:
                     RTC_TOPIC["SPORT_MOD"],
                     {"api_id": SPORT_CMD["Move"], "parameter": {"x": x, "y": y, "z": z}},
                 )
-                self.check_response("Move", response)
+                self.print_response("Move", response)
             except Exception as e:
-                self.print_action(f"Error sending movement command: {e}")
+                self.print_result(f"❌ Error sending movement command: {e}")
     
     @staticmethod
     def display_width(text):
@@ -297,9 +302,9 @@ class KeyboardController:
                     RTC_TOPIC["SPORT_MOD"],
                     {"api_id": SPORT_CMD[command_name], "parameter": parameter},
                 )
-                self.check_response(command_name, response)
+                self.print_response(command_name, response)
             except Exception as e:
-                self.print_action(f"Error sending {command_name} command: {e}")
+                self.print_result(f"❌ Error sending {command_name} command: {e}")
     
     async def handle_key_action(self, key):
         """Handle a key press based on the key_actions configuration"""
@@ -308,8 +313,9 @@ class KeyboardController:
             
         action = self.key_actions[key]
         
-        # Print the action message
-        self.print_action(action['message'])
+        # Print the action message; commands append their reply on the same line
+        sends = 'params' in action or 'command' in action
+        self.print_action(action['message'], end='' if sends else '\n')
         
         # Execute the appropriate action
         if 'params' in action:
@@ -454,7 +460,7 @@ async def main():
         await asyncio.sleep(1)
 
         # Leave joint-locked stand (e.g. after a dropped session) so Move works
-        print("⚖️ Switching to Balance Stand...")
+        print("⚖️ Switching to Balance Stand...", end="", flush=True)
         await controller.execute_sport_command("BalanceStand")
         await asyncio.sleep(1)
         
