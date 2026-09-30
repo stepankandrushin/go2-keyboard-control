@@ -22,6 +22,9 @@ import unicodedata
 import shutil
 import signal
 import time
+from collections import deque
+import cv2
+import numpy as np
 from unitree_webrtc_connect import (
     UnitreeWebRTCConnection,
     WebRTCConnectionMethod,
@@ -44,6 +47,18 @@ logging.basicConfig(level=logging.FATAL)
 TELEMETRY_TOPICS = ("LOW_STATE", "LF_SPORT_MOD_STATE", "MULTIPLE_STATE", "ULIDAR_STATE")
 STATUS_LINES = 3
 STALE_AFTER = 3  # seconds without a sample before a topic counts as missing
+VIDEO_WINDOW = "Go2 camera"
+LIDAR_WINDOW = "Go2 LiDAR"
+LIDAR_SIZE = 640     # LiDAR view side in pixels
+LIDAR_SCALE = 100    # pixels per metre: the robot's 6.4 m voxel map fills the view
+LIDAR_TOP = 1.5      # metres above the floor that get the hottest colour
+FLOOR_BAND = 0.1     # points this close to the floor are drawn as ground
+
+# LiDAR view colour per height code: 0 empty, 1 ground, 2..255 low to high
+LIDAR_COLORS = cv2.applyColorMap(np.arange(256, dtype=np.uint8), cv2.COLORMAP_TURBO).reshape(256, 1, 3)
+LIDAR_COLORS[2:] = LIDAR_COLORS[np.linspace(40, 255, 254).astype(int)]  # skip turbo's near-black end
+LIDAR_COLORS[0] = (30, 30, 30)
+LIDAR_COLORS[1] = (85, 85, 85)
 
 # lowstate motor_state order; entries past the 12th are unused on the Go2
 MOTOR_NAMES = [f"{leg} {joint}" for leg in ("FR", "FL", "RR", "RL")
@@ -64,6 +79,10 @@ class KeyboardController:
         self.telemetry = {}      # topic -> (monotonic time, latest data)
         self.errors = {}         # active robot errors: (source, code) -> text
         self.status_row = None   # terminal row of the status panel, if pinned
+        self.windows = {}        # OpenCV window name -> (image getter, on-close callback)
+        self.video_frame = None  # newest camera frame not shown yet
+        self.lidar_map = None    # newest voxel map not shown yet: (points, resolution)
+        self.window_keys = deque()  # keys typed while a window has focus
         
         # Movement settings
         self.movement_speed = 0.5     # Default movement speed
@@ -225,15 +244,19 @@ class KeyboardController:
         return list(self.key_actions.keys())
         
     def get_key(self):
-        """Get keyboard input for Mac OS X"""
-        if select.select([sys.stdin], [], [], 0.1)[0]:
+        """Next key from a window or the terminal, without blocking"""
+        if self.window_keys:
+            key = chr(self.window_keys.popleft()).lower()
+        elif select.select([sys.stdin], [], [], 0)[0]:
             key = sys.stdin.read(1).lower()
-            if key in ('\x1b', '\x03'):  # ESC, or Ctrl+C (no SIGINT in raw mode)
-                return 'esc'
-            elif key == ' ':  # Space
-                return 'space'
-            elif key in self.get_valid_keys():
-                return key
+        else:
+            return None
+        if key in ('\x1b', '\x03'):  # ESC, or Ctrl+C (no SIGINT in raw mode)
+            return 'esc'
+        elif key == ' ':  # Space
+            return 'space'
+        elif key in self.get_valid_keys():
+            return key
         return None
     
     def print_action(self, message, end='\n'):
@@ -319,14 +342,16 @@ class KeyboardController:
         sys.stdout.write(out)
         sys.stdout.flush()
 
+    def store_telemetry(self, topic):
+        """Subscription callback keeping the newest sample of a topic"""
+        def callback(message):
+            self.telemetry[topic] = (time.monotonic(), message["data"])
+        return callback
+
     def start_telemetry(self):
         """Subscribe to the state topics feeding the status panel"""
-        def store(topic):
-            def callback(message):
-                self.telemetry[topic] = (time.monotonic(), message["data"])
-            return callback
         for topic in TELEMETRY_TOPICS:
-            self.conn.datachannel.pub_sub.subscribe(RTC_TOPIC[topic], store(topic))
+            self.conn.datachannel.pub_sub.subscribe(RTC_TOPIC[topic], self.store_telemetry(topic))
 
     def latest(self, topic):
         """Newest sample of a telemetry topic, or None if missing or stale"""
@@ -459,6 +484,128 @@ class KeyboardController:
             self.draw_status()
             await asyncio.sleep(0.5)
 
+    def start_video(self):
+        """Stream the front camera into a window"""
+        # The video track's frames only start flowing once switched on
+        self.conn.video.add_track_callback(self.on_video_track)
+        self.conn.video.switchVideoChannel(True)
+        self.windows[VIDEO_WINDOW] = (self.camera_image, self.stop_video)
+
+    async def on_video_track(self, track):
+        """Keep the newest camera frame; the viewer decodes only what it shows"""
+        while self.running:
+            self.video_frame = await track.recv()
+
+    def camera_image(self):
+        """The newest camera frame if not shown yet, else None"""
+        frame, self.video_frame = self.video_frame, None
+        return None if frame is None else frame.to_ndarray(format="bgr24")
+
+    def stop_video(self):
+        """Turn the camera stream off once its window is closed"""
+        self.print_action("📷 Video window closed")
+        self.conn.video.switchVideoChannel(False)
+
+    async def start_lidar(self):
+        """Stream the LiDAR voxel map, and the pose it is drawn around, into a window"""
+        datachannel = self.conn.datachannel
+        await datachannel.disableTrafficSaving(True)  # needed for the voxel map stream
+        datachannel.set_decoder("native")  # plain points instead of the libvoxel mesh
+        datachannel.pub_sub.publish_without_callback(RTC_TOPIC["ULIDAR_SWITCH"], "on")
+        datachannel.pub_sub.subscribe(RTC_TOPIC["ULIDAR_ARRAY"], self.on_lidar_map)
+        datachannel.pub_sub.subscribe(RTC_TOPIC["ROBOTODOM"], self.store_telemetry("ROBOTODOM"))
+        self.windows[LIDAR_WINDOW] = (self.lidar_image, self.stop_lidar)
+
+    def on_lidar_map(self, message):
+        """Keep the newest voxel map (world-frame points around the robot)"""
+        data = message["data"]
+        self.lidar_map = (data["data"]["points"], data["resolution"])
+
+    def lidar_image(self):
+        """Top-down view of the newest voxel map, robot in the centre facing up.
+
+        Colour is height above the floor; None until a new map and a pose are in.
+        """
+        pose = self.latest("ROBOTODOM")
+        if self.lidar_map is None or pose is None:
+            return None
+        (points, resolution), self.lidar_map = self.lidar_map, None
+        position, q = pose["pose"]["position"], pose["pose"]["orientation"]
+        yaw = math.atan2(2 * (q["w"] * q["z"] + q["x"] * q["y"]), 1 - 2 * (q["y"] ** 2 + q["z"] ** 2))
+        sport = self.latest("LF_SPORT_MOD_STATE")
+        floor = position["z"] - (sport["body_height"] if sport else 0.32)
+
+        # Into the robot frame (x forward, y left), then forward is up on screen
+        dx, dy = points[:, 0] - position["x"], points[:, 1] - position["y"]
+        cos, sin = math.cos(yaw), math.sin(yaw)
+        forward, left = cos * dx + sin * dy, cos * dy - sin * dx
+        center = LIDAR_SIZE // 2
+        rows = np.round(center - forward * LIDAR_SCALE).astype(int)
+        cols = np.round(center - left * LIDAR_SCALE).astype(int)
+        height = points[:, 2] - floor
+        codes = np.where(height < FLOOR_BAND, 1,
+                         2 + np.clip(height / LIDAR_TOP, 0, 1) * 253).astype(np.uint8)
+        inside = (rows >= 0) & (rows < LIDAR_SIZE) & (cols >= 0) & (cols < LIDAR_SIZE)
+        grid = np.zeros((LIDAR_SIZE, LIDAR_SIZE), np.uint8)
+        np.maximum.at(grid, (rows[inside], cols[inside]), codes[inside])
+        # Grow points to voxel size (a bit over, so the rotated grid has no
+        # gaps); as seen from above, the tallest one wins
+        voxel = round(resolution * LIDAR_SCALE) + 2
+        grid = cv2.dilate(grid, np.ones((voxel, voxel), np.uint8))
+        image = cv2.LUT(cv2.merge([grid] * 3), LIDAR_COLORS)
+
+        # Range rings every metre, and the robot as an arrow
+        for metres in range(1, LIDAR_SIZE // (2 * LIDAR_SCALE) + 1):
+            radius = metres * LIDAR_SCALE
+            cv2.circle(image, (center, center), radius, (70, 70, 70), 1, cv2.LINE_AA)
+            cv2.putText(image, f"{metres} m", (center + 4, center - radius + 14),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (140, 140, 140), 1, cv2.LINE_AA)
+        arrow = np.array([(0, -22), (-11, 12), (0, 5), (11, 12)]) + center
+        cv2.fillPoly(image, [arrow], (255, 255, 255), cv2.LINE_AA)
+        cv2.putText(image, f"height 0-{LIDAR_TOP} m: blue to red, grey = floor",
+                    (8, LIDAR_SIZE - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
+        return image
+
+    def stop_lidar(self):
+        """Stop streaming the map; the LiDAR itself stays on for obstacle avoidance"""
+        self.print_action("📡 LiDAR window closed")
+        for topic in ("ULIDAR_ARRAY", "ROBOTODOM"):
+            self.conn.datachannel.pub_sub.unsubscribe(RTC_TOPIC[topic])
+
+    async def window_pump(self):
+        """Show camera and LiDAR images; keys typed in their windows control the robot too.
+
+        OpenCV windows must live on the main thread (macOS), so this runs as a
+        task on the event loop and pumps the windows with short waitKey calls.
+        """
+        shown = set()
+        while self.running and self.windows:
+            for name, (get_image, _) in self.windows.items():
+                image = get_image()
+                if image is not None:
+                    cv2.imshow(name, image)
+                    shown.add(name)
+            if shown:
+                # waitKeyEx: plain waitKey folds arrow keys into letters on Linux
+                key = cv2.waitKeyEx(1)
+                if 0 <= key < 128:
+                    self.window_keys.append(key)
+            for name in list(shown):
+                try:
+                    closed = cv2.getWindowProperty(name, cv2.WND_PROP_VISIBLE) < 1
+                except cv2.error:
+                    closed = True
+                if closed:
+                    shown.discard(name)
+                    _, on_close = self.windows.pop(name)
+                    on_close()
+            await asyncio.sleep(0.01)
+
+    def close_windows(self):
+        """Close the OpenCV windows (they only go away once events are pumped)"""
+        cv2.destroyAllWindows()
+        cv2.waitKey(1)
+
     def reset_screen(self):
         """Release the scroll region and put the cursor at the bottom"""
         height = shutil.get_terminal_size().lines
@@ -514,6 +661,7 @@ class KeyboardController:
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGWINCH, self.print_help)
         status_task = asyncio.create_task(self.status_updater())
+        window_task = asyncio.create_task(self.window_pump()) if self.windows else None
         self.print_action("🤖 Robot Control Started! Press 'ESC' to exit.")
         
         try:
@@ -521,7 +669,7 @@ class KeyboardController:
                 key = self.get_key()
                 
                 if key is None:
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.02)
                     continue
 
                 # Handle all other actions
@@ -536,6 +684,9 @@ class KeyboardController:
         finally:
             # Restore terminal settings
             status_task.cancel()
+            if window_task:
+                window_task.cancel()
+                self.close_windows()
             loop.remove_signal_handler(signal.SIGWINCH)
             self.reset_screen()
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
@@ -552,6 +703,10 @@ def parse_args():
                         help="per-device AES-128 key, needed on Go2 firmware >= 1.1.15 (env UNITREE_AES_KEY)")
     parser.add_argument("--timeout", type=float, default=3,
                         help="seconds to wait for discovery replies (default 3)")
+    parser.add_argument("--video", action="store_true",
+                        help="show the front camera in a window (keys work there too)")
+    parser.add_argument("--lidar", action="store_true",
+                        help="show a top-down LiDAR map in a window (keys work there too)")
     return parser.parse_args()
 
 
@@ -611,6 +766,10 @@ async def main():
         await conn.connect()
         print("✅ Connected successfully!")
         controller.start_telemetry()
+        if args.video:
+            controller.start_video()
+        if args.lidar:
+            await controller.start_lidar()
         
         ####### NORMAL MODE ########
         print("🔍 Checking current motion mode...")
