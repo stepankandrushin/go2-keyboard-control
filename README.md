@@ -16,6 +16,7 @@ uv run control.py                 # auto-discover the robot on the LAN (default)
 uv run control.py --ip 192.168.1.152
 uv run control.py --serial B42D2000XXXXXXXX   # when several robots answer
 uv run control.py --ap            # robot's own Wi-Fi AP (192.168.12.1)
+uv run control.py --video         # also show the front camera in a window
 ```
 
 Or with plain pip: `pip install unitree_webrtc_connect && python control.py`.
@@ -39,6 +40,13 @@ uvx --from unitree_webrtc_connect unitree-fetch-aes-key --email you@example.com 
 The help menu is pinned to the top of the terminal and redraws automatically
 on window resize; `Esc` exits. WASD move, Q/E and Z/C rotate, Space is an
 emergency stop; tricks, dances and gaits are on the remaining keys.
+
+## Camera
+
+`--video` opens the front camera (1280×720, ~15 fps) in an OpenCV window.
+The control keys work in that window too, so it can keep focus while you
+drive. Closing the window turns the video stream off; teleop carries on in
+the terminal.
 
 ## Status panel
 

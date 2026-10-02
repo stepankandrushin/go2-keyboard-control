@@ -22,6 +22,8 @@ import unicodedata
 import shutil
 import signal
 import time
+from collections import deque
+import cv2
 from unitree_webrtc_connect import (
     UnitreeWebRTCConnection,
     WebRTCConnectionMethod,
@@ -44,6 +46,7 @@ logging.basicConfig(level=logging.FATAL)
 TELEMETRY_TOPICS = ("LOW_STATE", "LF_SPORT_MOD_STATE", "MULTIPLE_STATE", "ULIDAR_STATE")
 STATUS_LINES = 3
 STALE_AFTER = 3  # seconds without a sample before a topic counts as missing
+VIDEO_WINDOW = "Go2 camera"
 
 # lowstate motor_state order; entries past the 12th are unused on the Go2
 MOTOR_NAMES = [f"{leg} {joint}" for leg in ("FR", "FL", "RR", "RL")
@@ -64,6 +67,9 @@ class KeyboardController:
         self.telemetry = {}      # topic -> (monotonic time, latest data)
         self.errors = {}         # active robot errors: (source, code) -> text
         self.status_row = None   # terminal row of the status panel, if pinned
+        self.show_video = False  # open a window with the front camera
+        self.video_frame = None  # newest camera frame not shown yet
+        self.window_keys = deque()  # keys typed while the video window has focus
         
         # Movement settings
         self.movement_speed = 0.5     # Default movement speed
@@ -225,15 +231,19 @@ class KeyboardController:
         return list(self.key_actions.keys())
         
     def get_key(self):
-        """Get keyboard input for Mac OS X"""
-        if select.select([sys.stdin], [], [], 0.1)[0]:
+        """Next key from the video window or the terminal, without blocking"""
+        if self.window_keys:
+            key = chr(self.window_keys.popleft()).lower()
+        elif select.select([sys.stdin], [], [], 0)[0]:
             key = sys.stdin.read(1).lower()
-            if key in ('\x1b', '\x03'):  # ESC, or Ctrl+C (no SIGINT in raw mode)
-                return 'esc'
-            elif key == ' ':  # Space
-                return 'space'
-            elif key in self.get_valid_keys():
-                return key
+        else:
+            return None
+        if key in ('\x1b', '\x03'):  # ESC, or Ctrl+C (no SIGINT in raw mode)
+            return 'esc'
+        elif key == ' ':  # Space
+            return 'space'
+        elif key in self.get_valid_keys():
+            return key
         return None
     
     def print_action(self, message, end='\n'):
@@ -459,6 +469,43 @@ class KeyboardController:
             self.draw_status()
             await asyncio.sleep(0.5)
 
+    async def on_video_track(self, track):
+        """Keep the newest camera frame; the viewer decodes only what it shows"""
+        while self.running:
+            self.video_frame = await track.recv()
+
+    async def video_viewer(self):
+        """Show camera frames in a window; keys typed there control the robot too.
+
+        OpenCV windows must live on the main thread (macOS), so this runs as a
+        task on the event loop and pumps the window with short waitKey calls.
+        """
+        opened = False
+        while self.running:
+            frame, self.video_frame = self.video_frame, None
+            if frame is not None:
+                cv2.imshow(VIDEO_WINDOW, frame.to_ndarray(format="bgr24"))
+                opened = True
+            if opened:
+                # waitKeyEx: plain waitKey folds arrow keys into letters on Linux
+                key = cv2.waitKeyEx(1)
+                if 0 <= key < 128:
+                    self.window_keys.append(key)
+                try:
+                    closed = cv2.getWindowProperty(VIDEO_WINDOW, cv2.WND_PROP_VISIBLE) < 1
+                except cv2.error:
+                    closed = True
+                if closed:
+                    self.print_action("📷 Video window closed")
+                    self.conn.video.switchVideoChannel(False)
+                    return
+            await asyncio.sleep(0.01)
+
+    def close_video(self):
+        """Close the video window (it only goes away once events are pumped)"""
+        cv2.destroyAllWindows()
+        cv2.waitKey(1)
+
     def reset_screen(self):
         """Release the scroll region and put the cursor at the bottom"""
         height = shutil.get_terminal_size().lines
@@ -514,6 +561,7 @@ class KeyboardController:
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGWINCH, self.print_help)
         status_task = asyncio.create_task(self.status_updater())
+        video_task = asyncio.create_task(self.video_viewer()) if self.show_video else None
         self.print_action("🤖 Robot Control Started! Press 'ESC' to exit.")
         
         try:
@@ -521,7 +569,7 @@ class KeyboardController:
                 key = self.get_key()
                 
                 if key is None:
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.02)
                     continue
 
                 # Handle all other actions
@@ -536,6 +584,9 @@ class KeyboardController:
         finally:
             # Restore terminal settings
             status_task.cancel()
+            if video_task:
+                video_task.cancel()
+                self.close_video()
             loop.remove_signal_handler(signal.SIGWINCH)
             self.reset_screen()
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
@@ -552,6 +603,8 @@ def parse_args():
                         help="per-device AES-128 key, needed on Go2 firmware >= 1.1.15 (env UNITREE_AES_KEY)")
     parser.add_argument("--timeout", type=float, default=3,
                         help="seconds to wait for discovery replies (default 3)")
+    parser.add_argument("--video", action="store_true",
+                        help="show the front camera in a window (keys work there too)")
     return parser.parse_args()
 
 
@@ -605,12 +658,17 @@ async def main():
             return
         
         controller.conn = conn
+        controller.show_video = args.video
         
         # Connect to the WebRTC service.
         print("🔗 Connecting to robot...")
         await conn.connect()
         print("✅ Connected successfully!")
         controller.start_telemetry()
+        if args.video:
+            # The video track's frames only start flowing once switched on
+            conn.video.add_track_callback(controller.on_video_track)
+            conn.video.switchVideoChannel(True)
         
         ####### NORMAL MODE ########
         print("🔍 Checking current motion mode...")
