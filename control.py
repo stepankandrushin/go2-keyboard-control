@@ -63,6 +63,7 @@ class KeyboardController:
         self.conn = None
         self.telemetry = {}      # topic -> (monotonic time, latest data)
         self.errors = {}         # active robot errors: (source, code) -> text
+        self.firmware = None     # firmware version the robot reported on connect
         self.status_row = None   # terminal row of the status panel, if pinned
         
         # Movement settings
@@ -294,7 +295,10 @@ class KeyboardController:
         num_cols = max(1, width // col_width)
         num_rows = -(-len(entries) // num_cols)
 
-        lines = ["=" * width, "🤖 ROBOT COMPLETE CONTROL SYSTEM", "=" * width]
+        title = "🤖 ROBOT COMPLETE CONTROL SYSTEM"
+        if self.firmware:
+            title += f"  firmware {self.firmware}"
+        lines = ["=" * width, title, "=" * width]
         for r in range(num_rows):
             row = [self.pad(entries[c * num_rows + r], col_width)
                    for c in range(num_cols) if c * num_rows + r < len(entries)]
@@ -327,6 +331,23 @@ class KeyboardController:
             return callback
         for topic in TELEMETRY_TOPICS:
             self.conn.datachannel.pub_sub.subscribe(RTC_TOPIC[topic], store(topic))
+
+    async def read_firmware(self):
+        """Ask the robot for its firmware version, the way the Unitree app does"""
+        try:
+            # bashrunner 1001 runs one of the robot's own scripts; this one
+            # only prints the version of the installed firmware package
+            response = await asyncio.wait_for(
+                self.conn.datachannel.pub_sub.publish_request_new(
+                    RTC_TOPIC["BASH_REQ"],
+                    {"api_id": 1001, "parameter": {"script": "get_whole_packet_version.sh"}},
+                ),
+                timeout=5,
+            )
+            self.firmware = json.loads(response["data"]["data"])["info"]
+            print(f"💾 Firmware: {self.firmware}")
+        except Exception as e:
+            print(f"⚠️ Could not read the firmware version: {e!r}")
 
     def latest(self, topic):
         """Newest sample of a telemetry topic, or None if missing or stale"""
@@ -611,7 +632,8 @@ async def main():
         await conn.connect()
         print("✅ Connected successfully!")
         controller.start_telemetry()
-        
+        await controller.read_firmware()
+
         ####### NORMAL MODE ########
         print("🔍 Checking current motion mode...")
         # Get the current motion_switcher status

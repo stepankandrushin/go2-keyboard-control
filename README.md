@@ -40,6 +40,13 @@ The help menu is pinned to the top of the terminal and redraws automatically
 on window resize; `Esc` exits. WASD move, Q/E and Z/C rotate, Space is an
 emergency stop; tricks, dances and gaits are on the remaining keys.
 
+The robot's firmware version is read once on connect, printed, and kept in
+the menu's title line (`🤖 ROBOT COMPLETE CONTROL SYSTEM  firmware 1.1.4`).
+It comes from the robot's own `get_whole_packet_version.sh`, run through
+`rt/api/bashrunner/request`, the request listed in
+[z4rtc](https://github.com/z4ziggy/z4rtc/blob/9c045a4/z4rtc.py)
+([local](sources/github.com/z4rtc-bashrunner-scripts.md)).
+
 ## Status panel
 
 Below the key menu, three lines refresh twice a second from the robot's
