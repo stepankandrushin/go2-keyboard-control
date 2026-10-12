@@ -40,16 +40,9 @@ The help menu is pinned to the top of the terminal and redraws automatically
 on window resize; `Esc` exits. WASD move, Q/E and Z/C rotate, Space is an
 emergency stop; tricks, dances and gaits are on the remaining keys.
 
-The robot's firmware version is read once on connect, printed, and kept in
-the menu's title line (`🤖 ROBOT COMPLETE CONTROL SYSTEM  firmware 1.1.4`).
-It comes from the robot's own `get_whole_packet_version.sh`, run through
-`rt/api/bashrunner/request`, the request listed in
-[z4rtc](https://github.com/z4ziggy/z4rtc/blob/9c045a4/z4rtc.py)
-([local](sources/github.com/z4rtc-bashrunner-scripts.md)).
-
 ## Status panel
 
-Below the key menu, three lines refresh twice a second from the robot's
+Below the key menu, four lines refresh twice a second from the robot's
 state topics (`rt/lf/lowstate`, `rt/lf/sportmodestate`, `rt/multiplestate`,
 `rt/utlidar/lidar_state`):
 
@@ -57,7 +50,16 @@ state topics (`rt/lf/lowstate`, `rt/lf/sportmodestate`, `rt/multiplestate`,
 🔋 74%  30.4 V  -1.7 A  -51 W  cells 23°C  BMS 26°C  body 39°C  2 cycles
 ✅ no errors  🌡️ motors max 32°C (FR calf)  📡 LiDAR 15 Hz, dirty 0%
 🐕 Balance stand, trot  0.02 m/s  height 0.32 m  roll +1° pitch -1°  speed level 0  avoidance on  volume 5/10
+💾 firmware 1.1.4  hardware 20  BMS 1.18  LiDAR firmware 1.2.3  LiDAR software 1.0.0.39  LiDAR SDK 1.0.9
 ```
+
+The last line holds the versions. Firmware and hardware are read once on
+connect, and printed then too, from the robot's own
+`get_whole_packet_version.sh` and `get_hardware_version.sh`, run through
+`rt/api/bashrunner/request`, the requests listed in
+[z4rtc](https://github.com/z4ziggy/z4rtc/blob/9c045a4/z4rtc.py)
+([local](sources/github.com/z4rtc-bashrunner-scripts.md)). The battery's
+and the LiDAR's come from the state topics and stay once seen.
 
 Battery current is negative while discharging. Robot errors (fan jammed,
 motor overheating, ...) are listed in the panel and logged when they appear

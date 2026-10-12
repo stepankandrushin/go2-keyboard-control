@@ -42,8 +42,15 @@ logging.basicConfig(level=logging.FATAL)
 # State topics feeding the status panel (lowstate and multiplestate come at
 # 1 Hz, sportmodestate at 20 Hz)
 TELEMETRY_TOPICS = ("LOW_STATE", "LF_SPORT_MOD_STATE", "MULTIPLE_STATE", "ULIDAR_STATE")
-STATUS_LINES = 3
+STATUS_LINES = 4
 STALE_AFTER = 3  # seconds without a sample before a topic counts as missing
+
+# Scripts of the robot's bashrunner service that only print a version, the
+# ones the Unitree app runs for its device page
+VERSION_SCRIPTS = {
+    "firmware": "get_whole_packet_version.sh",
+    "hardware": "get_hardware_version.sh",
+}
 
 # lowstate motor_state order; entries past the 12th are unused on the Go2
 MOTOR_NAMES = [f"{leg} {joint}" for leg in ("FR", "FL", "RR", "RL")
@@ -63,7 +70,7 @@ class KeyboardController:
         self.conn = None
         self.telemetry = {}      # topic -> (monotonic time, latest data)
         self.errors = {}         # active robot errors: (source, code) -> text
-        self.firmware = None     # firmware version the robot reported on connect
+        self.versions = {}       # component -> version, kept once the robot reports it
         self.status_row = None   # terminal row of the status panel, if pinned
         
         # Movement settings
@@ -295,10 +302,7 @@ class KeyboardController:
         num_cols = max(1, width // col_width)
         num_rows = -(-len(entries) // num_cols)
 
-        title = "🤖 ROBOT COMPLETE CONTROL SYSTEM"
-        if self.firmware:
-            title += f"  firmware {self.firmware}"
-        lines = ["=" * width, title, "=" * width]
+        lines = ["=" * width, "🤖 ROBOT COMPLETE CONTROL SYSTEM", "=" * width]
         for r in range(num_rows):
             row = [self.pad(entries[c * num_rows + r], col_width)
                    for c in range(num_cols) if c * num_rows + r < len(entries)]
@@ -332,22 +336,22 @@ class KeyboardController:
         for topic in TELEMETRY_TOPICS:
             self.conn.datachannel.pub_sub.subscribe(RTC_TOPIC[topic], store(topic))
 
-    async def read_firmware(self):
-        """Ask the robot for its firmware version, the way the Unitree app does"""
-        try:
-            # bashrunner 1001 runs one of the robot's own scripts; this one
-            # only prints the version of the installed firmware package
-            response = await asyncio.wait_for(
-                self.conn.datachannel.pub_sub.publish_request_new(
-                    RTC_TOPIC["BASH_REQ"],
-                    {"api_id": 1001, "parameter": {"script": "get_whole_packet_version.sh"}},
-                ),
-                timeout=5,
-            )
-            self.firmware = json.loads(response["data"]["data"])["info"]
-            print(f"💾 Firmware: {self.firmware}")
-        except Exception as e:
-            print(f"⚠️ Could not read the firmware version: {e!r}")
+    async def read_versions(self):
+        """Ask the robot for its firmware and hardware versions"""
+        for name, script in VERSION_SCRIPTS.items():
+            try:
+                # bashrunner 1001 runs one of the robot's own scripts
+                response = await asyncio.wait_for(
+                    self.conn.datachannel.pub_sub.publish_request_new(
+                        RTC_TOPIC["BASH_REQ"],
+                        {"api_id": 1001, "parameter": {"script": script}},
+                    ),
+                    timeout=3,
+                )
+                self.versions[name] = json.loads(response["data"]["data"])["info"]
+                print(f"💾 {name.capitalize()}: {self.versions[name]}")
+            except Exception as e:
+                print(f"⚠️ Could not read the {name} version: {e!r}")
 
     def latest(self, topic):
         """Newest sample of a telemetry topic, or None if missing or stale"""
@@ -443,6 +447,22 @@ class KeyboardController:
             ]
         return pieces or ["🐕 no motion data"]
 
+    def versions_status(self):
+        """Firmware and hardware versions, then those of the battery and LiDAR"""
+        low = self.latest("LOW_STATE")
+        if low:
+            bms = low["bms_state"]
+            self.versions["BMS"] = f"{bms['version_high']}.{bms['version_low']}"
+        lidar = self.latest("ULIDAR_STATE")
+        if lidar:
+            self.versions["LiDAR firmware"] = lidar["firmware_version"]
+            self.versions["LiDAR software"] = lidar["software_version"]
+            self.versions["LiDAR SDK"] = lidar["sdk_version"]
+        pieces = [f"{name} {version}" for name, version in self.versions.items()]
+        if not pieces:
+            return ["💾 no version data"]
+        return [f"💾 {pieces[0]}", *pieces[1:]]
+
     def fit(self, pieces, width):
         """Join status pieces into one line, dropping those that don't fit"""
         line = ""
@@ -461,7 +481,8 @@ class KeyboardController:
     def status_lines(self, width):
         """The status panel, one line per group"""
         return [self.fit(pieces, width) for pieces in
-                (self.power_status(), self.health_status(), self.motion_status())]
+                (self.power_status(), self.health_status(), self.motion_status(),
+                 self.versions_status())]
 
     def draw_status(self):
         """Refresh the status panel in place, keeping the cursor where it was"""
@@ -632,7 +653,7 @@ async def main():
         await conn.connect()
         print("✅ Connected successfully!")
         controller.start_telemetry()
-        await controller.read_firmware()
+        await controller.read_versions()
 
         ####### NORMAL MODE ########
         print("🔍 Checking current motion mode...")
