@@ -1,2 +1,5 @@
 __pycache__/
 .venv/
+
+# Claude Code's prompts for a next session stay on this machine, out of the repo
+next-prompts/
